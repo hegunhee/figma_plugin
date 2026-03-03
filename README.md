@@ -45,7 +45,9 @@ npm install
 
 ### 4. Claude Code에 MCP 서버 등록
 
-`~/.claude.json` 파일에 아래 내용 추가:
+프로젝트 루트의 `.mcp.json` 파일이 자동으로 인식됩니다. 이미 생성되어 있으며 별도 설정이 필요하지 않습니다.
+
+전역 등록이 필요한 경우 `~/.claude.json`에 아래 내용 추가:
 
 ```json
 {
@@ -56,13 +58,14 @@ npm install
         "--import",
         "tsx/esm",
         "C:/Users/sonju/Documents/projects/figma_plugin/mcp-server/src/index.ts"
-      ]
+      ],
+      "cwd": "C:/Users/sonju/Documents/projects/figma_plugin/mcp-server"
     }
   }
 }
 ```
 
-> 경로는 실제 프로젝트 위치에 맞게 수정하세요.
+> `cwd`는 필수입니다. 없으면 `tsx` 모듈을 찾지 못합니다. 경로는 실제 프로젝트 위치에 맞게 수정하세요.
 
 ---
 

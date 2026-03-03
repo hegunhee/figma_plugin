@@ -244,6 +244,8 @@ figma.ui.onmessage = async (msg: { type: string; payload?: Record<string, unknow
       case 'get_file_info': {
         reply({
           fileName: figma.root.name,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          fileKey: (figma as any).fileKey ?? null,
           pages: figma.root.children.map((p) => ({ id: p.id, name: p.name })),
           currentPage: { id: figma.currentPage.id, name: figma.currentPage.name },
           selectionCount: figma.currentPage.selection.length,
@@ -253,8 +255,14 @@ figma.ui.onmessage = async (msg: { type: string; payload?: Record<string, unknow
 
       // ── Comments ───────────────────────────────────────────────────────────
       case 'get_comments': {
-        const comments = await figma.getCommentsAsync();
-        const serialized = comments.map((c) => ({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const getCommentsAsync = (figma as any).getCommentsAsync;
+        if (typeof getCommentsAsync !== 'function') {
+          replyError('figma.getCommentsAsync is not supported in Figma Desktop plugin API. Use the Figma REST API MCP (figma_get_comments) instead.');
+          break;
+        }
+        const comments = await getCommentsAsync.call(figma);
+        const serialized = (comments as Comment[]).map((c) => ({
           id: c.id,
           message: c.message,
           author: c.author,
@@ -263,7 +271,6 @@ figma.ui.onmessage = async (msg: { type: string; payload?: Record<string, unknow
           resolvedAt: c.resolvedAt,
           orderId: c.orderId,
           reactions: c.reactions,
-          // Pin location
           position: 'x' in c.clientMeta
             ? { x: (c.clientMeta as Vector).x, y: (c.clientMeta as Vector).y }
             : { nodeId: (c.clientMeta as FrameOffset).node.id, offset: (c.clientMeta as FrameOffset).offset },

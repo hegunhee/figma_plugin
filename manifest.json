@@ -5,5 +5,9 @@
   "main": "code.js",
   "ui": "ui.html",
   "editorType": ["figma"],
-  "permissions": ["currentuser", "activeusers"]
+  "permissions": ["currentuser", "activeusers"],
+  "networkAccess": {
+    "allowedDomains": ["*"],
+    "reasoning": "Connects to local MCP bridge server (ws://localhost:3055) to relay Figma data to Claude Code."
+  }
 }

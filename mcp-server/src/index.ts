@@ -169,10 +169,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       description:
         'Figma 파일의 모든 댓글(코멘트)을 가져옵니다. ' +
         '수정 요청사항, 디자인 피드백, 미해결 이슈를 포함합니다. ' +
-        '각 댓글에는 작성자, 내용, 위치, 해결 여부가 포함됩니다.',
+        '각 댓글에는 작성자, 내용, 위치, 해결 여부가 포함됩니다. ' +
+        'fileKey는 Figma URL에서 추출: https://www.figma.com/design/<fileKey>/...',
       inputSchema: {
         type: 'object' as const,
         properties: {
+          fileKey: {
+            type: 'string',
+            description: 'Figma 파일 키 (URL에서 추출, 예: "serk1hEoUWgx1bvtaR3Lxc"). 미입력 시 현재 열린 파일에서 자동 감지 시도.',
+          },
           unresolvedOnly: {
             type: 'boolean',
             description: 'true이면 미해결 댓글만 반환 (기본값: false)',
@@ -204,6 +209,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
         required: ['nodeId'],
+      },
+    },
+    {
+      name: 'figma_reply_comment',
+      description:
+        'Figma 댓글에 답글을 답니다. ' +
+        '수정 사항을 답글로 남깁니다. 해결 완료(resolve) 처리는 Figma 공개 API 미지원으로 UI에서 직접 해주세요. ' +
+        'fileKey는 Figma URL에서 추출: https://www.figma.com/design/<fileKey>/...',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          fileKey: {
+            type: 'string',
+            description: 'Figma 파일 키 (URL에서 추출)',
+          },
+          commentId: {
+            type: 'string',
+            description: '답글을 달 댓글 ID',
+          },
+          message: {
+            type: 'string',
+            description: '답글 내용 (수정 완료 내역 등)',
+          },
+        },
+        required: ['fileKey', 'commentId', 'message'],
       },
     },
     {
@@ -249,13 +279,57 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'figma_get_comments': {
-        const raw = (await sendToFigma('get_comments')) as { count: number; comments: unknown[] };
-        let comments = raw.comments ?? [];
-        if (args.unresolvedOnly) {
-          comments = comments.filter((c) => !(c as Record<string, unknown>).resolved);
+        const apiToken = process.env.FIGMA_API_TOKEN;
+        if (!apiToken) {
+          throw new McpError(ErrorCode.InternalError, 'FIGMA_API_TOKEN 환경변수가 설정되지 않았습니다. MCP 서버 설정에 env.FIGMA_API_TOKEN을 추가해주세요.');
         }
-        const result = { count: comments.length, comments };
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+
+        // Use provided fileKey, or try to get it from the plugin
+        let resolvedFileKey = args.fileKey as string | undefined;
+        if (!resolvedFileKey) {
+          const fileInfo = await sendToFigma('get_file_info') as { fileKey?: string };
+          resolvedFileKey = fileInfo.fileKey;
+        }
+        if (!resolvedFileKey) {
+          throw new McpError(
+            ErrorCode.InternalError,
+            'Figma 파일 키를 가져올 수 없습니다. fileKey 파라미터에 Figma URL의 파일 키를 직접 전달해주세요.\n' +
+            '예: https://www.figma.com/design/<fileKey>/... 에서 <fileKey> 부분'
+          );
+        }
+        const fileKey = resolvedFileKey;
+
+        // Fetch comments via Figma REST API
+        const res = await fetch(`https://api.figma.com/v1/files/${fileKey}/comments`, {
+          headers: { 'X-Figma-Token': apiToken },
+        });
+        if (!res.ok) {
+          throw new McpError(ErrorCode.InternalError, `Figma API 오류: ${res.status} ${res.statusText}`);
+        }
+
+        type FigmaComment = {
+          id: string; message: string; created_at: string; resolved_at: string | null;
+          user: { handle: string; id: string };
+          client_meta: Record<string, unknown>;
+          reactions: unknown[];
+        };
+        const data = await res.json() as { comments: FigmaComment[] };
+
+        let comments = data.comments.map((c) => ({
+          id: c.id,
+          message: c.message,
+          author: c.user?.handle ?? 'Unknown',
+          createdAt: c.created_at,
+          resolved: c.resolved_at !== null,
+          resolvedAt: c.resolved_at,
+          position: c.client_meta,
+          reactions: c.reactions ?? [],
+        }));
+
+        if (args.unresolvedOnly) {
+          comments = comments.filter((c) => !c.resolved);
+        }
+        return { content: [{ type: 'text', text: JSON.stringify({ count: comments.length, comments }, null, 2) }] };
       }
 
       case 'figma_export_node': {
@@ -284,6 +358,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               mimeType: mimeMap[data.format] ?? 'image/png',
             },
           ],
+        };
+      }
+
+      case 'figma_reply_comment': {
+        const apiToken = process.env.FIGMA_API_TOKEN;
+        if (!apiToken) {
+          throw new McpError(ErrorCode.InternalError, 'FIGMA_API_TOKEN 환경변수가 설정되지 않았습니다.');
+        }
+        if (!args.fileKey) throw new McpError(ErrorCode.InvalidParams, 'fileKey가 필요합니다');
+        if (!args.commentId) throw new McpError(ErrorCode.InvalidParams, 'commentId가 필요합니다');
+        if (!args.message) throw new McpError(ErrorCode.InvalidParams, 'message가 필요합니다');
+
+        const headers = { 'X-Figma-Token': apiToken, 'Content-Type': 'application/json' };
+
+        // 1. 답글 달기
+        const replyRes = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/comments`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ message: `[AI 자동수정] ${args.message}`, comment_id: args.commentId }),
+        });
+        if (!replyRes.ok) {
+          const text = await replyRes.text();
+          throw new McpError(ErrorCode.InternalError, `답글 실패: ${replyRes.status} ${text}`);
+        }
+        const replyData = await replyRes.json() as { id: string };
+
+        // Note: Figma 공개 REST API에는 타인 댓글을 resolve하는 엔드포인트가 없습니다.
+        // 해결 완료 처리는 Figma UI에서 직접 해주세요.
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              replyId: replyData.id,
+              message: '답글을 달았습니다. 해결 완료 처리는 Figma UI에서 직접 해주세요.',
+            }, null, 2),
+          }],
         };
       }
 

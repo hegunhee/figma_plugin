@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "figma-bridge": {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx/esm",
+        "C:/Users/sonju/Documents/projects/figma_plugin/mcp-server/src/index.ts"
+      ],
+      "cwd": "C:/Users/sonju/Documents/projects/figma_plugin/mcp-server"
+    }
+  }
+}
