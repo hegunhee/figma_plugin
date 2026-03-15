@@ -11,6 +11,24 @@ import { randomUUID } from 'crypto';
 
 const WS_PORT = parseInt(process.env.MCP_BRIDGE_PORT ?? '3055', 10);
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+type FigmaComment = {
+  id: string;
+  message: string;
+  created_at: string;
+  resolved_at?: string | null;
+  parent_id?: string;
+  user: { handle: string; id: string };
+  client_meta: { node_id?: string; node_offset?: { x: number; y: number }; x?: number; y?: number } | null;
+  order_id?: string;
+  reactions?: unknown[];
+};
+
 // ─── WebSocket Bridge ─────────────────────────────────────────────────────────
 
 let figmaPlugin: WebSocket | null = null;
@@ -91,7 +109,13 @@ function sendToFigma(type: string, payload?: Record<string, unknown>, timeoutMs 
     }, timeoutMs);
 
     pending.set(requestId, { resolve, reject, timer });
-    figmaPlugin.send(JSON.stringify({ type, payload, requestId }));
+    try {
+      figmaPlugin.send(JSON.stringify({ type, payload, requestId }));
+    } catch (e) {
+      clearTimeout(timer);
+      pending.delete(requestId);
+      reject(new McpError(ErrorCode.InternalError, `WebSocket 전송 실패: ${e}`));
+    }
   });
 }
 
@@ -107,9 +131,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'figma_get_selection',
       description:
-        '현재 Figma에서 선택된 노드들의 상세 디자인 스펙을 반환합니다. ' +
-        '타이포그래피(폰트, 크기, 줄간격), 색상, 레이아웃(flexbox, padding, gap), ' +
-        '테두리, 그림자 효과, 자식 노드 포함.',
+        '현재 Figma에서 선택된 노드들의 디자인 스펙을 반환합니다. ' +
+        'detail 수준에 따라 반환 정보량이 달라집니다. ' +
+        'minimal=id/name/type/size만, standard=레이아웃/색상/타이포 포함, full=boundVariables/componentProperties/overrides 등 모든 속성. ' +
+        '노드 수가 많으면 자동으로 깊은 자식의 detail이 줄어듭니다.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -118,14 +143,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: '자식 노드 탐색 최대 깊이 (기본값: 5)',
             default: 5,
           },
+          detail: {
+            type: 'string',
+            enum: ['minimal', 'standard', 'full'],
+            description: '직렬화 상세 수준 (기본값: standard). minimal=id/name/type/size, standard=레이아웃/색상/타이포, full=boundVariables/componentProperties/overrides/styledSegments 등 전체',
+            default: 'standard',
+          },
         },
       },
     },
     {
       name: 'figma_get_node',
       description:
-        '특정 노드 ID로 Figma 노드의 전체 디자인 스펙을 가져옵니다. ' +
-        'URL의 node-id 파라미터(예: 123:456)를 사용하세요.',
+        '특정 노드 ID로 Figma 노드의 디자인 스펙을 가져옵니다. ' +
+        'URL의 node-id 파라미터(예: 123:456)를 사용하세요. ' +
+        'PAGE 노드도 지원합니다 (최상위 프레임 목록 반환). ' +
+        'detail=full이면 boundVariables, componentProperties, styledSegments 등을 포함합니다. ' +
+        '널값/빈배열/기본값(visible:true, opacity:1 등)은 자동 제거됩니다.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -138,13 +172,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: '자식 노드 탐색 최대 깊이 (기본값: 5)',
             default: 5,
           },
+          detail: {
+            type: 'string',
+            enum: ['minimal', 'standard', 'full'],
+            description: '직렬화 상세 수준 (기본값: standard). minimal=id/name/type/size, standard=레이아웃/색상/타이포, full=전체 속성 포함',
+            default: 'standard',
+          },
         },
         required: ['nodeId'],
       },
     },
     {
       name: 'figma_get_page_nodes',
-      description: '현재 Figma 페이지의 모든 최상위 노드 목록을 가져옵니다.',
+      description:
+        '현재 Figma 페이지의 모든 최상위 노드 목록을 가져옵니다. ' +
+        '노드가 30개를 초과하면 경고와 함께 응답합니다. 이 경우 detail:"minimal"로 변경하거나, 특정 노드를 figma_get_node로 직접 조회하여 범위를 줄여주세요.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -152,6 +194,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'number',
             description: '자식 탐색 깊이 (기본값: 3, 큰 파일은 낮게 설정)',
             default: 3,
+          },
+          detail: {
+            type: 'string',
+            enum: ['minimal', 'standard', 'full'],
+            description: '직렬화 상세 수준 (기본값: standard)',
+            default: 'standard',
           },
         },
       },
@@ -246,6 +294,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {},
       },
     },
+    {
+      name: 'figma_analyze_comments',
+      description:
+        '미해결 댓글을 조회하고, 각 댓글이 위치한 노드의 디자인 스펙을 함께 반환합니다. ' +
+        '한 번의 호출로 "어디에 어떤 문제가 있는지"를 파악할 수 있습니다. ' +
+        '노드 정보는 기본적으로 minimal로 가져오며, 특정 노드를 상세히 보려면 figma_get_node로 재조회하세요. ' +
+        'fileKey는 Figma URL에서 추출: https://www.figma.com/design/<fileKey>/...',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          fileKey: {
+            type: 'string',
+            description: 'Figma 파일 키 (URL에서 추출). 미입력 시 자동 감지.',
+          },
+          detail: {
+            type: 'string',
+            enum: ['minimal', 'standard'],
+            description: '노드 정보 상세 수준 (기본값: minimal). 댓글이 많을 경우 minimal 권장.',
+            default: 'minimal',
+          },
+        },
+      },
+    },
   ],
 }));
 
@@ -255,27 +326,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case 'figma_get_selection': {
-        const data = await sendToFigma('get_selection', { maxDepth: args.maxDepth ?? 5 });
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+        const data = await sendToFigma('get_selection', {
+          maxDepth: clamp(Number(args.maxDepth) || 5, 0, 10),
+          detail: args.detail ?? 'standard',
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(data) }] };
       }
 
       case 'figma_get_node': {
         if (!args.nodeId) throw new McpError(ErrorCode.InvalidParams, 'nodeId가 필요합니다');
         const data = await sendToFigma('get_node', {
           nodeId: args.nodeId as string,
-          maxDepth: args.maxDepth ?? 5,
+          maxDepth: clamp(Number(args.maxDepth) || 5, 0, 10),
+          detail: args.detail ?? 'standard',
         });
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+        return { content: [{ type: 'text', text: JSON.stringify(data) }] };
       }
 
       case 'figma_get_page_nodes': {
-        const data = await sendToFigma('get_page_nodes', { maxDepth: args.maxDepth ?? 3 });
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+        const data = await sendToFigma('get_page_nodes', {
+          maxDepth: clamp(Number(args.maxDepth) || 3, 0, 10),
+          detail: args.detail ?? 'standard',
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(data) }] };
       }
 
       case 'figma_get_file_info': {
         const data = await sendToFigma('get_file_info');
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+        return { content: [{ type: 'text', text: JSON.stringify(data) }] };
       }
 
       case 'figma_get_comments': {
@@ -307,12 +385,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InternalError, `Figma API 오류: ${res.status} ${res.statusText}`);
         }
 
-        type FigmaComment = {
-          id: string; message: string; created_at: string; resolved_at: string | null;
-          user: { handle: string; id: string };
-          client_meta: Record<string, unknown>;
-          reactions: unknown[];
-        };
         const data = await res.json() as { comments: FigmaComment[] };
 
         let comments = data.comments.map((c) => ({
@@ -320,8 +392,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           message: c.message,
           author: c.user?.handle ?? 'Unknown',
           createdAt: c.created_at,
-          resolved: c.resolved_at !== null,
-          resolvedAt: c.resolved_at,
+          resolved: c.resolved_at != null,
+          resolvedAt: c.resolved_at ?? null,
           position: c.client_meta,
           reactions: c.reactions ?? [],
         }));
@@ -329,7 +401,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.unresolvedOnly) {
           comments = comments.filter((c) => !c.resolved);
         }
-        return { content: [{ type: 'text', text: JSON.stringify({ count: comments.length, comments }, null, 2) }] };
+        return { content: [{ type: 'text', text: JSON.stringify({ count: comments.length, comments }) }] };
       }
 
       case 'figma_export_node': {
@@ -339,7 +411,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           {
             nodeId: args.nodeId as string,
             format: args.format ?? 'PNG',
-            scale: args.scale ?? 2,
+            scale: clamp(Number(args.scale) || 2, 0.5, 4),
           },
           60_000 // 60s timeout for exports
         )) as { base64: string; format: string };
@@ -394,14 +466,128 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               success: true,
               replyId: replyData.id,
               message: '답글을 달았습니다. 해결 완료 처리는 Figma UI에서 직접 해주세요.',
-            }, null, 2),
+            }),
           }],
         };
       }
 
       case 'figma_get_styles': {
         const data = await sendToFigma('get_styles');
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+        return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+      }
+
+      case 'figma_analyze_comments': {
+        const apiToken = process.env.FIGMA_API_TOKEN;
+        if (!apiToken) {
+          throw new McpError(ErrorCode.InternalError, 'FIGMA_API_TOKEN 환경변수가 설정되지 않았습니다.');
+        }
+
+        // Resolve fileKey
+        let resolvedFileKey = args.fileKey as string | undefined;
+        if (!resolvedFileKey) {
+          const fileInfo = await sendToFigma('get_file_info') as { fileKey?: string };
+          resolvedFileKey = fileInfo.fileKey;
+        }
+        if (!resolvedFileKey) {
+          throw new McpError(ErrorCode.InternalError, 'fileKey를 가져올 수 없습니다. fileKey 파라미터를 직접 전달해주세요.');
+        }
+
+        // Fetch comments
+        const res = await fetch(`https://api.figma.com/v1/files/${resolvedFileKey}/comments`, {
+          headers: { 'X-Figma-Token': apiToken },
+        });
+        if (!res.ok) {
+          throw new McpError(ErrorCode.InternalError, `Figma API 오류: ${res.status} ${res.statusText}`);
+        }
+
+        const data = await res.json() as { comments: FigmaComment[] };
+
+        // Filter unresolved only
+        const unresolvedComments = data.comments.filter((c) => c.resolved_at == null);
+
+        // Group by thread (top-level comments with their replies)
+        const topLevel = unresolvedComments.filter((c) => !c.parent_id);
+        const replies = unresolvedComments.filter((c) => c.parent_id);
+        const replyMap = new Map<string, FigmaComment[]>();
+        for (const r of replies) {
+          const pid = r.parent_id!;
+          const list = replyMap.get(pid) ?? [];
+          list.push(r);
+          replyMap.set(pid, list);
+        }
+
+        // Collect unique node IDs
+        const nodeIds = new Set<string>();
+        for (const c of topLevel) {
+          const nodeId = c.client_meta?.node_id;
+          if (nodeId) nodeIds.add(nodeId);
+        }
+
+        // Fetch node info for each unique nodeId (parallel, 10s timeout per node)
+        const detail = (args.detail as string) ?? 'minimal';
+        const nodeInfoMap = new Map<string, unknown>();
+        const nodeIdArray = [...nodeIds];
+        const results = await Promise.allSettled(
+          nodeIdArray.map((nodeId) =>
+            sendToFigma('get_node', { nodeId, maxDepth: 1, detail }, 10_000)
+          )
+        );
+        for (let i = 0; i < nodeIdArray.length; i++) {
+          const r = results[i];
+          nodeInfoMap.set(
+            nodeIdArray[i],
+            r.status === 'fulfilled' ? r.value : { error: `노드 조회 실패: ${r.reason}` }
+          );
+        }
+
+        // Build result
+        const analyzed = topLevel.map((c) => {
+          const nodeId = c.client_meta?.node_id;
+          const entry: Record<string, unknown> = {
+            commentId: c.id,
+            author: c.user?.handle ?? 'Unknown',
+            message: c.message,
+            createdAt: c.created_at,
+          };
+
+          // Position
+          if (nodeId) {
+            entry.nodeId = nodeId;
+            entry.position = c.client_meta?.node_offset ?? null;
+          } else if (c.client_meta?.x !== undefined) {
+            entry.canvasPosition = { x: c.client_meta.x, y: c.client_meta.y };
+          }
+
+          // Replies
+          const threadReplies = replyMap.get(c.id);
+          if (threadReplies?.length) {
+            entry.replies = threadReplies.map((r) => ({
+              author: r.user?.handle ?? 'Unknown',
+              message: r.message,
+              createdAt: r.created_at,
+            }));
+          }
+
+          // Node info
+          if (nodeId && nodeInfoMap.has(nodeId)) {
+            entry.node = nodeInfoMap.get(nodeId);
+          }
+
+          return entry;
+        });
+
+        const result: Record<string, unknown> = {
+          fileKey: resolvedFileKey,
+          unresolvedCount: topLevel.length,
+          detail,
+          comments: analyzed,
+        };
+
+        if (topLevel.length > 20) {
+          result.warning = `미해결 댓글이 ${topLevel.length}개입니다. 특정 댓글의 노드를 상세히 보려면 figma_get_node(nodeId, detail:"standard")로 재조회하세요.`;
+        }
+
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       }
 
       default:

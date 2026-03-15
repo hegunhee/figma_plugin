@@ -154,5 +154,12 @@ window.onmessage = (event: MessageEvent) => {
   connect();
 };
 
+// ─── Help toggle ─────────────────────────────────────────────────────────────
+
+(window as unknown as Record<string, unknown>).toggleHelp = () => {
+  const overlay = document.getElementById('help-overlay') as HTMLElement;
+  overlay.classList.toggle('visible');
+};
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 connect();
