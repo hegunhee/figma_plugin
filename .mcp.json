@@ -4,10 +4,10 @@
       "command": "node",
       "args": [
         "--import",
-        "tsx/esm",
-        "C:/Users/sonju/Documents/projects/figma_plugin/mcp-server/src/index.ts"
+        "tsx/dist/esm",
+        "src/index.ts"
       ],
-      "cwd": "C:/Users/sonju/Documents/projects/figma_plugin/mcp-server"
+      "cwd": "<path>/mcp-server"
     }
   }
 }

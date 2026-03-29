@@ -54,7 +54,10 @@ npm run build
 
 ### 4. Configure Claude Code MCP
 
-The `.mcp.json` at the project root is picked up automatically. For global registration, add to `~/.claude/mcp.json`:
+The `.mcp.json` at the project root is picked up automatically.
+**After cloning, update the `<path>` placeholder in `.mcp.json` to your actual project path** (e.g., `/Users/you/projects/figma-mcp-bridge`).
+
+For global registration, add to `~/.claude/mcp.json`:
 
 ```json
 {

@@ -54,7 +54,10 @@ npm run build
 
 ### 4. Claude Code MCP 설정
 
-프로젝트 루트의 `.mcp.json`이 자동 인식됩니다. 전역 등록은 `~/.claude/mcp.json`에 추가:
+프로젝트 루트의 `.mcp.json`이 자동 인식됩니다.
+**클론 후 `.mcp.json`의 `<경로>` 플레이스홀더를 실제 프로젝트 경로로 수정하세요** (예: `/Users/you/projects/figma-mcp-bridge`).
+
+전역 등록은 `~/.claude/mcp.json`에 추가:
 
 ```json
 {

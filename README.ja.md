@@ -54,7 +54,10 @@ npm run build
 
 ### 4. Claude Code MCP設定
 
-プロジェクトルートの `.mcp.json` は自動的に認識されます。グローバル登録は `~/.claude/mcp.json` に追加：
+プロジェクトルートの `.mcp.json` は自動的に認識されます。
+**クローン後、`.mcp.json` 内の `<パス>` プレースホルダーを実際のプロジェクトパスに変更してください**（例：`/Users/you/projects/figma-mcp-bridge`）。
+
+グローバル登録は `~/.claude/mcp.json` に追加：
 
 ```json
 {
